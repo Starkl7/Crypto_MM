@@ -1,0 +1,6 @@
+/docs/*
+/results/*
+/build/*
+
+/CLAUDE.md
+/.DS_Store
