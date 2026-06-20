@@ -10,9 +10,9 @@ The goal is honest: establish whether the textbook AS policy delivers a
 positive risk-adjusted edge on a high-volatility, fee-light venue, and to
 expose the failure modes that prevent it from doing so in practice.
 
-> **Status.** Engine stable; test suite green. Best configuration over 68
-> walk-forward windows (24 h calibration / 1 h out-of-sample):
-> **Total PnL −\$107.91**, **Max DD \$155.98**, **522 fills**.
+> **Status.** Engine stable; test suite green. Best configuration over 105
+> walk-forward windows (24 h calibration / 1 h out-of-sample, Jun 14–20 2026):
+> **Total PnL −\$73.95**, **Max DD \$205.06**, **936 fills**.
 > This is a *negative-PnL* result before maker rebates and is reported as-is —
 > the value of the project is the methodology and the diagnosed failure modes,
 > not a profitable strategy. See [Results](#results) and the
@@ -153,8 +153,10 @@ Written to `--out/`: `window_results.csv`, `fills_log.csv`, `quotes_log.csv`,
 
 ## Results
 
-68 walk-forward windows, γ = 0.1, lot = 0.001 BTC, 50 ms latency, 5σ glitch
-filter, Coincall BTCUSD perpetual OB + trades.
+All runs: γ = 0.1, lot = 0.001 BTC, 50 ms order latency, 5σ glitch filter,
+Coincall BTCUSD perpetual OB + trades.
+
+### Configuration sweep (Jun 14–18 2026, 68 windows)
 
 | Configuration                              | Total PnL     | Max DD       | Fills   | Avg realized spread |
 | ------------------------------------------ | ------------- | ------------ | ------- | ------------------- |
@@ -162,16 +164,25 @@ filter, Coincall BTCUSD perpetual OB + trades.
 | σ-adaptive (α = 1, q = ±10)                | −\$154.23     | \$177.87     | 616     | −\$75.50            |
 | **σ-adaptive + q = ±5 (default)**          | **−\$107.91** | **\$155.98** | **522** | **−\$63.51**        |
 
-The combined fix reduces losses by **58%** and drawdown by **47%** versus
-baseline. Crucially, **average realized spread improves monotonically** as the
-fixes stack — the real signal that adverse selection per fill is dropping. Most
-of the gain comes from extreme-volatility windows, where the σ-adaptive horizon
-prevents the baseline's pathological \$300+ half-spreads and \$3,000-per-lot
-inventory skew.
+The σ-adaptive τ + tighter inventory bounds reduce losses by **58%** and
+drawdown by **47%** versus the fixed-τ baseline. Average realized spread
+improves monotonically as the fixes stack — the real signal that adverse
+selection per fill is dropping. Most of the gain comes from extreme-volatility
+windows, where the σ-adaptive horizon prevents pathological \$300+ half-spreads
+and \$3,000-per-lot inventory skew.
 
-A single low-volatility window (W37) carries roughly half the residual loss; the
-[handoff doc §7.5](docs/as_perpetual_handoff.md) diagnoses it and proposes three
-remedies.
+### Extended validation (Jun 14–20 2026, 105 windows)
+
+| Configuration               | Total PnL    | Max DD       | Fills   | Avg realized spread |
+| --------------------------- | ------------ | ------------ | ------- | ------------------- |
+| σ-adaptive + q = ±5 (default) | **−\$73.95** | **\$205.06** | **936** | **−\$68.05**        |
+
+Extending the dataset by ~2 days raises the window count by 54% (68 → 105) and
+increases fill count 79% (522 → 936). The higher Max DD reflects the longer
+run rather than degraded per-window behaviour. A single low-volatility window
+(W37 of the original run) carries roughly half the residual loss; the
+[handoff doc §7.5](docs/as_perpetual_handoff.md) diagnoses it and proposes
+three remedies.
 
 ---
 

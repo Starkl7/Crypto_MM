@@ -1,9 +1,0 @@
-{
-  "name": "glft-wf-backtest",
-  "version": "0.1.0",
-  "dependencies": [
-    "duckdb",
-    "nlopt",
-    "fmt"
-  ]
-}
