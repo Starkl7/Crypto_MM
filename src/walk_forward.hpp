@@ -29,6 +29,15 @@ struct WalkForwardConfig {
     // Fill engine
     FillEngineConfig fill_cfg;
 
+    // σ filter: skip quoting entirely when calibrated σ < sigma_min ($/snapshot).
+    // Prevents the degenerate fill storm in near-zero-volatility windows.
+    // 0 = disabled (quote in all windows).
+    double sigma_min    = 0.0;
+
+    // Hybrid τ: use separate τ_inv for inventory skew so ask >= mid at q_max.
+    // Active by default when tau_risk >= 0. Set false to disable.
+    bool hybrid_tau     = true;
+
     // Sensitivity sweep: if true, run recal_hours in {0.5, 1, 2, 4}
     bool recal_sweep    = false;
 
@@ -55,7 +64,7 @@ struct WalkForwardResult {
     std::vector<int64_t> ts_series;
     std::vector<double>  pnl_series;
     std::vector<double>  mid_series;
-    std::vector<int>     inv_series;
+    std::vector<double>  inv_series;
     std::vector<double>  bid_series;
     std::vector<double>  ask_series;
 

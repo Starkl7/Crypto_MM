@@ -26,6 +26,10 @@ SimState run_fill_engine(const OBSeries&        ob,
     bool    pending_stale_flag = false;
     bool    live_stale_flag    = false;
     bool    have_live_quote    = false;
+    double  live_quote_mid     = 0.0;   // mid when the live quote was last submitted
+    double  pending_quote_mid  = 0.0;   // mid when the pending quote was computed
+    int64_t bid_cancel_at_ms   = -1;    // wall-clock ms when a directional bid cancel lands
+    int64_t ask_cancel_at_ms   = -1;    // wall-clock ms when a directional ask cancel lands
 
     std::size_t tr_cur = tr_start;
     double prev_mid = (ob_start < ob.mid.size()) ? ob.mid[ob_start] : 0.0;
@@ -48,34 +52,67 @@ SimState run_fill_engine(const OBSeries&        ob,
         prev_mid = mid;
 
         // ── 1a. Glitch: cancel all quotes — equivalent to exchange cancel-all ────
-        // If the mid jumped anomalously, wipe both live and pending so no fills
-        // happen against stale prices and we re-quote fresh from the next clean snap.
         if (mid_glitch) {
             have_live_quote    = false;
             pending_live_at_ms = -1;
+            bid_cancel_at_ms   = -1;
+            ask_cancel_at_ms   = -1;
         }
 
-        // ── 1b. Promote pending quote if its go-live time has passed ──────────
+        // ── 1b. Apply effective side-cancellations ────────────────────────────
+        // Sentinel the side whose cancel has now landed (uses order_latency_ms as
+        // cancel round-trip — fills that arrive before the cancel are still taken).
+        if (bid_cancel_at_ms >= 0 && t_ms >= bid_cancel_at_ms) {
+            live_bid         = -1e18;
+            bid_cancel_at_ms = -1;
+        }
+        if (ask_cancel_at_ms >= 0 && t_ms >= ask_cancel_at_ms) {
+            live_ask         =  1e18;
+            ask_cancel_at_ms = -1;
+        }
+
+        // ── 1c. Promote pending quote if its go-live time has passed ──────────
+        // A side-cancel is cleared only if the incoming quote is NOT itself drifted
+        // on that side — i.e. the new quote was computed close enough to current mid
+        // that it is validly priced. If the new quote is also stale, the cancel stays
+        // active so it can fire at its scheduled time.
         if (pending_live_at_ms >= 0 && t_ms >= pending_live_at_ms) {
-            live_bid        = pending_bid;
-            live_ask        = pending_ask;
-            live_stale_flag = pending_stale_flag;
+            live_bid         = pending_bid;
+            live_ask         = pending_ask;
+            live_stale_flag  = pending_stale_flag;
+            live_quote_mid   = pending_quote_mid;
             pending_live_at_ms = -1;
             have_live_quote    = true;
+            if (cfg.cancel_drift_mul > 0.0) {
+                const double drift = mid - live_quote_mid;
+                const double thr   = cfg.cancel_drift_mul * cur_params.sigma;
+                if (drift <= thr)  ask_cancel_at_ms = -1;  // new ask valid: clear cancel
+                if (drift >= -thr) bid_cancel_at_ms = -1;  // new bid valid: clear cancel
+            } else {
+                bid_cancel_at_ms = -1;
+                ask_cancel_at_ms = -1;
+            }
+        }
+
+        // ── 1d. Directional drift detection → queue per-side cancel ───────────
+        // Only cancel the side that drifted into the money.
+        //   mid rose  → our ask became cheap vs new mid → cancel ask only.
+        //   mid fell  → our bid became expensive vs new mid → cancel bid only.
+        // Cancel lands after order_latency_ms (same round-trip as a new order).
+        // Fills that arrive before the cancel is effective are accepted — no lookahead.
+        if (cfg.cancel_drift_mul > 0.0 && have_live_quote && !mid_glitch) {
+            const double drift = mid - live_quote_mid;   // signed: + = mid rose
+            const double thr   = cfg.cancel_drift_mul * cur_params.sigma;
+            if (drift >  thr && ask_cancel_at_ms < 0)
+                ask_cancel_at_ms = t_ms + cfg.order_latency_ms;
+            if (drift < -thr && bid_cancel_at_ms < 0)
+                bid_cancel_at_ms = t_ms + cfg.order_latency_ms;
         }
 
         // ── 2. Fill trades in (t_prev_ms, t_ms] against the LIVE quote ───────
         // During a glitch snapshot we treat the book as if no quote is live —
         // equivalent to cancel-all-orders: stale quotes must not be hit while
         // the mid is anomalous.
-        // NOTE on sizing: cash moves by `fill_qty = min(lot_size, trade.size)`,
-        // but inventory is tracked in whole lots (±1) and MTM values the position
-        // at `inventory · lot_size · mid`. When a trade is *smaller* than one lot,
-        // we pay for a partial fill yet book a full lot — cash and inventory bases
-        // diverge. This is benign at the default lot (0.001 BTC ≈ $65, almost always
-        // ≤ trade size, so fill_qty == lot_size), but it becomes a real PnL bug if
-        // `--lot-notional` pushes lot_size above typical trade sizes. Fix before
-        // sizing up: either reject sub-lot trades or accumulate fractional inventory.
         if (have_live_quote && !mid_glitch) {
             while (tr_cur < tr_end && trades.ts_ms[tr_cur] <= t_ms) {
                 double tp      = trades.price[tr_cur];
@@ -83,46 +120,54 @@ SimState run_fill_engine(const OBSeries&        ob,
                 int64_t tr_ts  = trades.ts_ms[tr_cur];
 
                 // Bid fill: trade walked THROUGH our bid (price strictly below it)
-                // We are BUYING: we pay cash and receive BTC
-                if (tp < live_bid && state.inventory < cur_params.q_max) {
-                    double fill_qty  = std::min(cfg.lot_size, tr_size);
-                    int    inv_before = state.inventory;
-                    state.cash      -= live_bid * fill_qty;   // we PAY bid_price × qty
-                    state.inventory += 1;
+                // We are BUYING: we pay cash and receive BTC.
+                // Guard: ensure the fill won't push inventory above q_max even with
+                // fractional lots (fill_qty/lot_size may be < 1 when trade is sub-lot).
+                if (tp < live_bid) {
+                    double fill_qty   = std::min(cfg.lot_size, tr_size);
+                    double inv_delta  = fill_qty / cfg.lot_size;
+                    if (state.inventory + inv_delta <= static_cast<double>(cur_params.q_max)) {
+                        double inv_before = state.inventory;
+                        state.cash       -= live_bid * fill_qty;
+                        state.inventory  += inv_delta;
 
-                    state.fills.push_back(FillEvent{
-                        tr_ts,
-                        cfg.window_id,
-                        'B',
-                        live_bid,
-                        fill_qty,
-                        inv_before,
-                        state.inventory,
-                        mid,                 // OB mid at the time of the fill
-                        mid - live_bid,      // realized spread: positive = bought below mid
-                        live_stale_flag
-                    });
+                        state.fills.push_back(FillEvent{
+                            tr_ts,
+                            cfg.window_id,
+                            'B',
+                            live_bid,
+                            fill_qty,
+                            inv_before,
+                            state.inventory,
+                            mid,
+                            mid - live_bid,
+                            live_stale_flag
+                        });
+                    }
                 }
                 // Ask fill: trade walked THROUGH our ask (price strictly above it)
-                // We are SELLING: we receive cash and deliver BTC
-                if (tp > live_ask && state.inventory > cur_params.q_min) {
-                    double fill_qty  = std::min(cfg.lot_size, tr_size);
-                    int    inv_before = state.inventory;
-                    state.cash      += live_ask * fill_qty;   // we RECEIVE ask_price × qty
-                    state.inventory -= 1;
+                // We are SELLING: we receive cash and deliver BTC.
+                if (tp > live_ask) {
+                    double fill_qty   = std::min(cfg.lot_size, tr_size);
+                    double inv_delta  = fill_qty / cfg.lot_size;
+                    if (state.inventory - inv_delta >= static_cast<double>(cur_params.q_min)) {
+                        double inv_before = state.inventory;
+                        state.cash       += live_ask * fill_qty;
+                        state.inventory  -= inv_delta;
 
-                    state.fills.push_back(FillEvent{
-                        tr_ts,
-                        cfg.window_id,
-                        'A',
-                        live_ask,
-                        fill_qty,
-                        inv_before,
-                        state.inventory,
-                        mid,
-                        live_ask - mid,      // realized spread: positive = sold above mid
-                        live_stale_flag
-                    });
+                        state.fills.push_back(FillEvent{
+                            tr_ts,
+                            cfg.window_id,
+                            'A',
+                            live_ask,
+                            fill_qty,
+                            inv_before,
+                            state.inventory,
+                            mid,
+                            live_ask - mid,
+                            live_stale_flag
+                        });
+                    }
                 }
                 ++tr_cur;
             }
@@ -148,11 +193,21 @@ SimState run_fill_engine(const OBSeries&        ob,
             auto [new_bid, new_ask] = bid_ask(mid, state.inventory, t_snap, cur_params);
             if (state.inventory >= cur_params.q_max) new_bid = -1e18;
             if (state.inventory <= cur_params.q_min) new_ask =  1e18;
+            // Minimum half-spread floor: if the model quotes tighter than this
+            // (common at near-zero σ), widen to the floor so we don't sit inside
+            // the OB touch and catch every single trade.
+            if (cfg.min_half_spread > 0.0) {
+                if (new_bid > -1e17 && mid - new_bid < cfg.min_half_spread)
+                    new_bid = mid - cfg.min_half_spread;
+                if (new_ask <  1e17 && new_ask - mid < cfg.min_half_spread)
+                    new_ask = mid + cfg.min_half_spread;
+            }
 
             pending_bid        = new_bid;
             pending_ask        = new_ask;
             pending_live_at_ms = t_ms + cfg.order_latency_ms;
             pending_stale_flag = stale;
+            pending_quote_mid  = mid;
 
             double d_bid = (new_bid > -1e17) ? (mid - new_bid) : -1.0;
             double d_ask = (new_ask <  1e17) ? (new_ask - mid) : -1.0;

@@ -33,7 +33,9 @@ Fill engine:
   --lot-size N           Lot size in BTC                                [default: 0.001]
   --lot-notional N       If > 0: lot_size = N / initial_mid (overrides lot-size)
   --order-latency-ms N   Order submission round-trip (ms)               [default: 50]
+  --min-spread-bps N     Minimum half-spread floor in bps of mid; 0=off   [default: 0]
   --glitch-sigma N       Cancel quotes if |delta_mid| > N*sigma/snap; 0=off [default: 5.0]
+  --cancel-drift N       Cancel live/pending quote if mid drifts > N*sigma from computation mid; 0=off [default: 0]
 
 Modes:
   --dead-time            Pause quoting during recalibration latency gap
@@ -54,15 +56,19 @@ struct Args {
     double      recal_hours   =  1.0;
     double      gamma         =  0.1;
     double      tau_risk      = -1.0;
-    double      vol_budget    =  5.0;
+    double      vol_budget    =  0.5;   // v4: tight quoting at ~$3-9 half-spread
     double      vol_exponent  =  1.0;
     double      lot_size      =  0.001;
     int         q_max         =  5;
     int         q_min         = -5;
     double      lot_notional  =  0.0;   // if > 0: lot_size = lot_notional / initial_mid
     int64_t     order_lat_ms  = 50;
+    double      min_spread_bps =  0.0;
     double      glitch_sigma  =  5.0;
+    double      cancel_drift  =  0.0;
     bool        dead_time     = false;
+    double      sigma_min     =  0.0;
+    bool        no_hybrid_tau = false;
     bool        recal_sweep   = false;
 };
 
@@ -88,8 +94,12 @@ static Args parse_args(int argc, char** argv) {
         else if (eq("--lot-size"))         a.lot_size      = std::atof(next());
         else if (eq("--lot-notional"))     a.lot_notional  = std::atof(next());
         else if (eq("--order-latency-ms")) a.order_lat_ms  = std::atoll(next());
+        else if (eq("--min-spread-bps"))   a.min_spread_bps= std::atof(next());
         else if (eq("--glitch-sigma"))     a.glitch_sigma  = std::atof(next());
+        else if (eq("--cancel-drift"))     a.cancel_drift  = std::atof(next());
         else if (eq("--dead-time"))        a.dead_time     = true;
+        else if (eq("--sigma-min"))        a.sigma_min     = std::atof(next());
+        else if (eq("--no-hybrid-tau"))    a.no_hybrid_tau = true;
         else if (eq("--recal-sweep"))      a.recal_sweep   = true;
         else if (eq("--help"))            { usage(argv[0]); std::exit(0); }
         else throw std::runtime_error(std::string("Unknown flag: ") + argv[i]);
@@ -113,7 +123,13 @@ static void run_single(const OBSeries& ob, const TradeSeries& trades,
                                     : a.lot_size;
     cfg.fill_cfg.order_latency_ms = a.order_lat_ms;
     cfg.fill_cfg.dead_time_mode   = a.dead_time;
+    cfg.sigma_min                 = a.sigma_min;
+    cfg.hybrid_tau                = !a.no_hybrid_tau;
+    cfg.fill_cfg.min_half_spread  = (a.min_spread_bps > 0.0)
+                                    ? a.min_spread_bps / 10000.0 * ob.mid.front()
+                                    : 0.0;
     cfg.fill_cfg.glitch_sigma_mul = a.glitch_sigma;
+    cfg.fill_cfg.cancel_drift_mul = a.cancel_drift;
     cfg.vol_budget        = a.vol_budget;
     cfg.vol_exponent      = a.vol_exponent;
     cfg.q_max             = a.q_max;

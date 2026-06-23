@@ -9,7 +9,9 @@ struct FillEngineConfig {
     int64_t  order_latency_ms  = 50;      // order submission round-trip
     bool     dead_time_mode    = false;   // if true: no quotes during recal gap
     int      window_id         = 0;       // stamped on every FillEvent and QuoteUpdate
+    double   min_half_spread   = 0.0;    // absolute floor on half-spread (USD); 0 = disabled
     double   glitch_sigma_mul  = 5.0;    // skip quote if |Δmid| > N*σ per snapshot; 0 = disabled
+    double   cancel_drift_mul  = 0.0;    // cancel live/pending quote if mid drifts > N*σ from computation mid; 0 = disabled
 };
 
 // Run a single OOS window over ob[ob_start, ob_end) and trades[tr_start, tr_end).

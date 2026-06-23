@@ -10,8 +10,8 @@ struct FillEvent {
     char    side;              // 'B' = bid filled, 'A' = ask filled
     double  fill_price;        // our live quote price at which we were filled
     double  fill_qty;          // BTC filled
-    int     inv_before;
-    int     inv_after;
+    double  inv_before;
+    double  inv_after;
     double  mid_at_fill;       // mid price at trade timestamp
     double  realized_spread;   // fill_price - mid (bid: >0 we received above mid; ask: <0 we paid above mid)
     bool    stale_params;      // true if fill occurred during recal latency gap
@@ -27,20 +27,20 @@ struct QuoteUpdate {
     double  mid;
     double  delta_bid;         // mid - bid_quote (how far inside on bid side)
     double  delta_ask;         // ask_quote - mid (how far inside on ask side)
-    int     inventory;         // inventory at time of computation
+    double  inventory;         // inventory in fractional lots at time of computation
     bool    stale_params;      // true if computed using stale params
 };
 
 // ── Simulation state ──────────────────────────────────────────────────────────
 struct SimState {
     double cash        = 0.0;
-    int    inventory   = 0;
+    double inventory   = 0.0;  // fractional lots; MTM = cash + inventory * lot_size * mid
 
     // Per-OB-snapshot time series (parallel arrays — all same length after run)
     std::vector<int64_t> ts_series;   // wall-clock timestamps (ms)
     std::vector<double>  pnl;         // mark-to-market: cash + inventory * mid
     std::vector<double>  mid_series;  // mid price at each snapshot
-    std::vector<int>     inv_series;
+    std::vector<double>  inv_series;
     std::vector<double>  bid_series;  // live (active at exchange) bid quote
     std::vector<double>  ask_series;  // live (active at exchange) ask quote
 
@@ -94,11 +94,11 @@ inline PnlStats pnl_stats(const SimState& s) {
 
     if (!s.inv_series.empty()) {
         double inv_sum = 0.0;
-        for (int q : s.inv_series) inv_sum += q;
+        for (double q : s.inv_series) inv_sum += q;
         st.mean_inventory = inv_sum / s.inv_series.size();
 
         double inv_var = 0.0;
-        for (int q : s.inv_series) { double d = q - st.mean_inventory; inv_var += d * d; }
+        for (double q : s.inv_series) { double d = q - st.mean_inventory; inv_var += d * d; }
         st.std_inventory = std::sqrt(inv_var / s.inv_series.size());
     }
 

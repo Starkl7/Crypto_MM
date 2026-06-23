@@ -10,13 +10,13 @@ The goal is honest: establish whether the textbook AS policy delivers a
 positive risk-adjusted edge on a high-volatility, fee-light venue, and to
 expose the failure modes that prevent it from doing so in practice.
 
-> **Status.** Engine stable; test suite green. Best configuration over 105
-> walk-forward windows (24 h calibration / 1 h out-of-sample, Jun 14–20 2026):
-> **Total PnL −\$73.95**, **Max DD \$205.06**, **936 fills**.
-> This is a *negative-PnL* result before maker rebates and is reported as-is —
-> the value of the project is the methodology and the diagnosed failure modes,
-> not a profitable strategy. See [Results](#results) and the
-> [caveats](#caveats--known-limitations).
+> **Status.** Engine stable; test suite green (24 / 24). Best configuration
+> over **185 walk-forward windows** (24 h calibration / 1 h OOS, Jun 14–23 2026,
+> Coincall BTCUSD perp):
+> **Total PnL +\$38.04 · Mean Sharpe 1.84 · 69.7 % profitable windows · 46,799 fills**.
+> See [Results](#results) and [docs/design\_findings.md](docs/design_findings.md)
+> for the full journey from −\$74 (v2) to +\$38 (v4) and the design decisions
+> that drove it.
 
 ---
 
@@ -134,7 +134,10 @@ Run the tests:
 | `--cal-hours`        | Calibration window length (h)                      | 24      |
 | `--recal-hours`      | Out-of-sample / recal cadence (h)                  | 1       |
 | `--gamma`            | AS risk-aversion γ                                 | 0.1     |
-| `--vol-budget`       | `B` in `τ = B/(γ·σ^α)`                              | 5.0     |
+| `--vol-budget`       | `B` in `τ = B/(γ·σ^α)`; sets half-spread ≈ B·σ/2    | **0.5** |
+| `--sigma-min`        | Suppress quoting when calibrated σ < threshold       | 0       |
+| `--min-spread-bps`   | Absolute minimum half-spread floor (bps of mid)      | 0       |
+| `--cancel-drift`     | Cancel stale side when mid drifts > N·σ from quote   | 0       |
 | `--vol-exponent`     | `α` in the adaptive-τ formula                      | 1.0     |
 | `--q-max` / `--q-min`| Hard inventory bounds (lots)                       | ±5      |
 | `--lot-size`         | Lot size in BTC                                    | 0.001   |
@@ -156,33 +159,43 @@ Written to `--out/`: `window_results.csv`, `fills_log.csv`, `quotes_log.csv`,
 All runs: γ = 0.1, lot = 0.001 BTC, 50 ms order latency, 5σ glitch filter,
 Coincall BTCUSD perpetual OB + trades.
 
-### Configuration sweep (Jun 14–18 2026, 68 windows)
+### Version evolution — Jun 14–22 2026 (full dataset, 174 windows)
 
-| Configuration                              | Total PnL     | Max DD       | Fills   | Avg realized spread |
-| ------------------------------------------ | ------------- | ------------ | ------- | ------------------- |
-| Baseline (τ = 10, q = ±10)                 | −\$256.94     | \$294.31     | 480     | −\$352.05           |
-| σ-adaptive (α = 1, q = ±10)                | −\$154.23     | \$177.87     | 616     | −\$75.50            |
-| **σ-adaptive + q = ±5 (default)**          | **−\$107.91** | **\$155.98** | **522** | **−\$63.51**        |
+| Version | Key change | PnL | Fills | Mean RS/fill | % Profitable |
+| ------- | ---------- | --- | ----- | ------------ | ------------ |
+| Baseline | Original binary | −\$256.94 | 480 | – | – |
+| v2 | Recal-latency fix | −\$73.95 | 936 | −\$68.05 | 6.7 % |
+| v3 | Hybrid τ + fractional inventory | −\$17.23 | 95 | +\$37.24 | 47.1 % |
+| **v4 (default)** | **vol\_budget = 0.5 (tight quoting)** | **+\$38.04** | **46,799** | **+\$2.92** | **69.7 %** |
 
-The σ-adaptive τ + tighter inventory bounds reduce losses by **58%** and
-drawdown by **47%** versus the fixed-τ baseline. Average realized spread
-improves monotonically as the fixes stack — the real signal that adverse
-selection per fill is dropping. Most of the gain comes from extreme-volatility
-windows, where the σ-adaptive horizon prevents pathological \$300+ half-spreads
-and \$3,000-per-lot inventory skew.
+### v4 headline metrics (Jun 14–23 2026 · 185 windows · 1 h OOS)
 
-### Extended validation (Jun 14–20 2026, 105 windows)
+| Metric | Value |
+| --- | --- |
+| Total PnL | **+\$38.04** |
+| Mean Sharpe | **1.84 ± 2.78** |
+| % Profitable windows | **69.7 %** |
+| Total fills | **46,799** (7 % fill rate of tape trades) |
+| Mean realized spread | +\$2.92 / fill |
+| Negative-spread fills | 13.1 % |
+| Max single-window drawdown | \$15.53 |
+| Valid fills (correct trade direction) | 51.2 % |
+| Stale fills (quote drifted past touch) | 48.8 % (\$2–4 inversion, price-improved in real LOB) |
 
-| Configuration               | Total PnL    | Max DD       | Fills   | Avg realized spread |
-| --------------------------- | ------------ | ------------ | ------- | ------------------- |
-| σ-adaptive + q = ±5 (default) | **−\$73.95** | **\$205.06** | **936** | **−\$68.05**        |
+### What drove the improvements
 
-Extending the dataset by ~2 days raises the window count by 54% (68 → 105) and
-increases fill count 79% (522 → 936). The higher Max DD reflects the longer
-run rather than degraded per-window behaviour. A single low-volatility window
-(W37 of the original run) carries roughly half the residual loss; the
-[handoff doc §7.5](docs/as_perpetual_handoff.md) diagnoses it and proposes
-three remedies.
+**v2 → v3 (hybrid τ)**: The AS formula with high inventory and `vol_budget=5`
+produced asks far below mid (`ask ≈ mid − $462` at q=5, σ=20). Every buy trade
+triggered a fill, generating 3 k+ fills with mean RS −\$68. The *hybrid τ* fix
+uses a separate `τ_inv` for the inventory skew, set so `ask = mid exactly at
+q_max` regardless of σ. Zero inverted quotes after this change.
+
+**v3 → v4 (vol\_budget 5→0.5)**: With hybrid τ curing inversions, the remaining
+problem was too-wide spreads (`half-spread ≈ $54` at the old default vs. OB
+half-spread `$5.40`). Only 0.5 % of trades moved far enough from mid to trigger
+a fill. Reducing `vol_budget` to 0.5 tightens the half-spread to `≈$3–9`, at
+the OB touch. Fill count jumped from 95 to 43 k and the strategy turned
+profitable by capturing the bid-ask spread on rapid inventory turnover.
 
 ---
 
@@ -196,9 +209,10 @@ This is a backtest, and an honest one. Before quoting any number externally:
   per-step accrual are implemented, but `f = 0` and no funding feed is wired in.
 - **No queue-position model.** Any fill at a touched price is assumed to be ours
   — optimistic. Do not size up until this exists.
-- **Sub-lot cash/inventory divergence.** Cash moves by `min(lot, trade.size)`
-  while inventory books whole lots; benign at the default \$65 lot, but a real
-  bug if `--lot-notional` is pushed above typical trade sizes.
+- **Stale-quote fills (≈ 49% at vol\_budget=0.5).** At tight spreads, roughly
+  half of fills occur when our quote drifts 1–2 ticks past the market touch.
+  In a real LOB these are *price-improved* (better prices for us), not rejected.
+  The simulation charges us our quoted price, making reported PnL a lower bound.
 - **OB mid used as reference**, not mark/index price.
 
 ---

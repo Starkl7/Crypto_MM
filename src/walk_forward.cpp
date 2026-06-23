@@ -112,9 +112,39 @@ WalkForwardResult run_walk_forward(const OBSeries&          ob,
             params.tau_risk = cfg.vol_budget / (cfg.gamma * std::pow(sigma, cfg.vol_exponent));
         else
             params.tau_risk = (cfg.tau_risk >= 0.0) ? cfg.tau_risk : -1.0;
+
+        // ── Hybrid τ (Option 5) ──────────────────────────────────────────────
+        // Spread uses tau_risk (controls fill-probability decay via κ).
+        // Inventory skew uses tau_inv, chosen so the ask = mid exactly at q_max
+        // and bid = mid exactly at q_min — no quote ever inverts regardless of σ.
+        //
+        //   δ(τ_spread) = (γσ²τ_spread)/2 + (1/γ)·ln(1 + γ/κ)
+        //   ask@q_max  = mid − q_max·γσ²·τ_inv + δ  →  set = mid
+        //   ⟹  τ_inv  = δ / (q_max · γσ²)
+        //
+        // Active only in stationary/vol-budget mode (tau_risk >= 0).
+        // In terminal mode (tau_risk < 0) τ changes per snapshot; leave tau_inv = -1.
+        if (cfg.hybrid_tau && params.tau_risk >= 0.0 && params.q_max > 0 && sigma > 0.0) {
+            const double g_s2_t = params.gamma * sigma * sigma * params.tau_risk;
+            const double delta   = g_s2_t / 2.0
+                                 + (1.0 / params.gamma) * std::log(1.0 + params.gamma / params.kappa);
+            params.tau_inv = delta / (static_cast<double>(params.q_max) * params.gamma * sigma * sigma);
+        } else {
+            params.tau_inv = -1.0;
+        }
+
         params.funding_rate_per_s = 0.0;
         params.q_max = cfg.q_max;
         params.q_min = cfg.q_min;
+
+        // σ filter: if calibrated σ is below the minimum threshold, suppress
+        // all quoting by collapsing inventory limits to zero. This prevents the
+        // degenerate fill storm that occurs when σ≈0 makes the AS spread
+        // negligibly small (ask collapses to mid, catching every trade).
+        if (cfg.sigma_min > 0.0 && sigma < cfg.sigma_min) {
+            params.q_max = 0;
+            params.q_min = 0;
+        }
 
         // For the stale-param period we use the previous window's params
         // (on window 0 both are the same — no prior)

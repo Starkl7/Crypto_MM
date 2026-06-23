@@ -36,7 +36,7 @@ void write_results(const WalkForwardResult& result, const std::string& out_dir) 
         f << "ts_ms,window_id,side,fill_price,fill_qty,inv_before,inv_after,"
              "mid_at_fill,realized_spread,stale_params\n";
         for (const auto& e : result.fills) {
-            f << fmt::format("{},{},{},{:.4f},{:.6f},{},{},{:.4f},{:.4f},{}\n",
+            f << fmt::format("{},{},{},{:.4f},{:.6f},{:.4f},{:.4f},{:.4f},{:.4f},{}\n",
                 e.ts_ms, e.window_id, e.side,
                 e.fill_price, e.fill_qty,
                 e.inv_before, e.inv_after,
@@ -51,7 +51,7 @@ void write_results(const WalkForwardResult& result, const std::string& out_dir) 
         f << "ts_ms,live_at_ms,window_id,bid_quote,ask_quote,mid,delta_bid,delta_ask,"
              "inventory,stale_params\n";
         for (const auto& q : result.quote_updates) {
-            f << fmt::format("{},{},{},{:.4f},{:.4f},{:.4f},{:.4f},{:.4f},{},{}\n",
+            f << fmt::format("{},{},{},{:.4f},{:.4f},{:.4f},{:.4f},{:.4f},{:.4f},{}\n",
                 q.ts_ms, q.live_at_ms, q.window_id,
                 q.bid_quote, q.ask_quote, q.mid,
                 q.delta_bid, q.delta_ask,
@@ -65,7 +65,7 @@ void write_results(const WalkForwardResult& result, const std::string& out_dir) 
         f << "ts_ms,pnl,mid,inventory,live_bid,live_ask\n";
         const std::size_t n = result.ts_series.size();
         for (std::size_t i = 0; i < n; ++i) {
-            f << fmt::format("{},{:.4f},{:.4f},{},{:.4f},{:.4f}\n",
+            f << fmt::format("{},{:.4f},{:.4f},{:.4f},{:.4f},{:.4f}\n",
                 result.ts_series[i],
                 result.pnl_series[i],
                 result.mid_series[i],
